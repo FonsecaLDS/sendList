@@ -244,7 +244,12 @@ async function loadState() {
     const sm = await window.storage.get('wedding_sent_v2');
     const cfg = await window.storage.get('wedding_config_v2');
     if(gs) guests = JSON.parse(gs.value);
-    if(sm) sentMap = JSON.parse(sm.value);
+    if(sm) {
+      const raw = JSON.parse(sm.value);
+      // Normaliza chaves para número, pois JSON converte para string
+      sentMap = {};
+      Object.keys(raw).forEach(k => { sentMap[Number(k)] = raw[k]; });
+    }
     if(cfg) {
       const c = JSON.parse(cfg.value);
       if(c.link) document.getElementById('link-site').value = c.link;
