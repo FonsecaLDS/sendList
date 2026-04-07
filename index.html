@@ -1,9 +1,19 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Confirmações de Casamento</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=DM+Sans:wght@300;400;500&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
-  :root{--rose:#c9707a;--rose-light:#f7e8ea;--rose-dark:#8a3d46;--gold:#b8975a;--gold-light:#f5edd8;--bg:var(--color-background-primary);--bg2:var(--color-background-secondary);--border:var(--color-border-tertiary);--text:var(--color-text-primary);--muted:var(--color-text-secondary)}
-  body{font-family:'DM Sans',sans-serif;color:var(--text)}
+  :root{
+    --rose:#c9707a;--rose-light:#f7e8ea;--rose-dark:#8a3d46;
+    --gold:#b8975a;--gold-light:#f5edd8;
+    --bg:#ffffff;--bg2:#f9f6f6;--border:#e8dede;
+    --text:#2c1f1f;--muted:#9a8080;
+  }
+  body{font-family:'DM Sans',sans-serif;color:var(--text);background:var(--bg)}
   .app{padding:1.5rem 1rem;max-width:900px;margin:0 auto}
   .header{text-align:center;margin-bottom:1.5rem;padding-bottom:1.5rem;border-bottom:0.5px solid var(--border)}
   .header h1{font-family:'Playfair Display',serif;font-size:28px;font-weight:500;color:var(--rose-dark);letter-spacing:0.02em}
@@ -61,8 +71,11 @@
   .btn-wa{display:flex;align-items:center;gap:8px;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:none;background:#25D366;color:#fff;text-decoration:none}
   .empty{text-align:center;padding:3rem;color:var(--muted);font-size:14px}
   .save-note{font-size:11px;color:var(--muted);text-align:center;margin-top:1.5rem;padding-top:1rem;border-top:0.5px solid var(--border)}
+  .loading-overlay{position:fixed;inset:0;background:rgba(255,255,255,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:200;gap:12px}
+  .loading-overlay p{font-size:13px;color:var(--muted)}
+  .spinner{width:28px;height:28px;border:3px solid var(--rose-light);border-top-color:var(--rose);border-radius:50%;animation:spin 0.7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* ── MOBILE RESPONSIVE ── */
   @media (max-width: 600px) {
     .app{padding:1rem 0.75rem}
     .header h1{font-size:22px}
@@ -86,6 +99,13 @@
     .card-mobile-footer{display:none}
   }
 </style>
+</head>
+<body>
+
+<div class="loading-overlay" id="loading-overlay">
+  <div class="spinner"></div>
+  <p>Conectando ao banco de dados...</p>
+</div>
 
 <div class="app">
   <div class="header">
@@ -147,7 +167,25 @@ Seu código de acesso:
   </div>
 </div>
 
-<script>
+<script type="module">
+import { initializeApp }                          from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc }      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ── Firebase config ───────────────────────────────────────────
+const firebaseConfig = {
+  apiKey:            "AIzaSyAVzlK64WDFIzFV4YRUzkzhhWIwMcBxLCQ",
+  authDomain:        "meu-casamento-80726.firebaseapp.com",
+  databaseURL:       "https://meu-casamento-80726-default-rtdb.firebaseio.com",
+  projectId:         "meu-casamento-80726",
+  storageBucket:     "meu-casamento-80726.firebasestorage.app",
+  messagingSenderId: "233841165660",
+  appId:             "1:233841165660:web:de5f05d9bc1a154eb9ed99"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ── Dados dos convidados ──────────────────────────────────────
 const RAW_DATA = [
   ["Victor Mendola e Karen","Victor Andrade Mendola","(17) 99732-1606"],
   ["Douglas Costa e Familia","Douglas Monteiro Costa","(17) 98220-5999"],
@@ -215,81 +253,113 @@ const RAW_DATA = [
   ["Yuller e Miriely","Yuller","(17) 99721-7973"]
 ];
 
-function defaultCode(group) {
-  return group;
-}
-
+// ── Helpers ───────────────────────────────────────────────────
 function phoneToWa(raw) {
   let n = raw.replace(/\D/g,'');
   if(n.length<=9) return n;
   if(!n.startsWith('55') && n.length<=13) n='55'+n;
   return n;
 }
-
 function initials(name) {
   const p = name.trim().split(' ');
   if(p.length===1) return p[0].slice(0,2).toUpperCase();
   return (p[0][0]+(p[p.length-1][0]||'')).toUpperCase();
 }
+function escHtml(s) {
+  return String(s).replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
-let guests = [];
-let sentMap = {};
+// ── Estado ────────────────────────────────────────────────────
+let guests        = [];
+let sentMap       = {};
 let currentFilter = 'all';
-let activeIdx = null;
-let openEditId = null;
+let activeIdx     = null;
+let openEditId    = null;
+let saveTimer     = null;
 
-async function loadState() {
+// ── Firebase: ler e gravar ────────────────────────────────────
+async function fbGet(key) {
   try {
-    const gs = await window.storage.get('wedding_guests_v2');
-    const sm = await window.storage.get('wedding_sent_v2');
-    const cfg = await window.storage.get('wedding_config_v2');
-    if(gs) guests = JSON.parse(gs.value);
-    if(sm) {
-      const raw = JSON.parse(sm.value);
-      // Normaliza chaves para número, pois JSON converte para string
+    const snap = await getDoc(doc(db, 'wedding', key));
+    return snap.exists() ? snap.data().value : null;
+  } catch(e) { return null; }
+}
+async function fbSet(key, value) {
+  await setDoc(doc(db, 'wedding', key), { value });
+}
+
+// ── Load ──────────────────────────────────────────────────────
+async function loadState() {
+  document.getElementById('loading-overlay').style.display = 'flex';
+  try {
+    const [gs, sm, cfg] = await Promise.all([
+      fbGet('guests'),
+      fbGet('sentMap'),
+      fbGet('config')
+    ]);
+    if (gs) guests = JSON.parse(gs);
+    if (sm) {
+      const raw = JSON.parse(sm);
       sentMap = {};
+      // Chaves voltam como string do JSON — converter para número
       Object.keys(raw).forEach(k => { sentMap[Number(k)] = raw[k]; });
     }
-    if(cfg) {
-      const c = JSON.parse(cfg.value);
-      if(c.link) document.getElementById('link-site').value = c.link;
-      if(c.msg) document.getElementById('msg-template').value = c.msg;
+    if (cfg) {
+      const c = JSON.parse(cfg);
+      if (c.link) document.getElementById('link-site').value = c.link;
+      if (c.msg)  document.getElementById('msg-template').value = c.msg;
     }
-  } catch(e) {}
-  if(!guests || guests.length===0) {
-    guests = RAW_DATA.map((r,i)=>({id:i, group:r[0], name:r[1], phone:r[2], code:defaultCode(r[0])}));
+  } catch(e) {
+    console.error('Erro ao carregar dados:', e);
   }
+  if (!guests || guests.length === 0) {
+    guests = RAW_DATA.map((r,i) => ({ id:i, group:r[0], name:r[1], phone:r[2], code:r[0] }));
+  }
+  document.getElementById('loading-overlay').style.display = 'none';
   renderAll();
 }
 
+// ── Save ──────────────────────────────────────────────────────
 async function saveState() {
+  const note = document.getElementById('save-note');
+  note.textContent = '⏳ Salvando...';
   try {
     const link = document.getElementById('link-site').value;
-    const msg = document.getElementById('msg-template').value;
-    await window.storage.set('wedding_guests_v2', JSON.stringify(guests));
-    await window.storage.set('wedding_sent_v2', JSON.stringify(sentMap));
-    await window.storage.set('wedding_config_v2', JSON.stringify({link,msg}));
-    const n = document.getElementById('save-note');
-    n.textContent = '✓ Salvo em '+new Date().toLocaleTimeString('pt-BR');
+    const msg  = document.getElementById('msg-template').value;
+    await Promise.all([
+      fbSet('guests',  JSON.stringify(guests)),
+      fbSet('sentMap', JSON.stringify(sentMap)),
+      fbSet('config',  JSON.stringify({ link, msg }))
+    ]);
+    note.textContent = '✓ Salvo em ' + new Date().toLocaleTimeString('pt-BR');
   } catch(e) {
-    document.getElementById('save-note').textContent = '⚠ Erro ao salvar.';
+    note.textContent = '⚠ Erro ao salvar. Verifique a conexão.';
+    console.error(e);
   }
 }
+function debounceSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 800);
+}
+
+// ── Render ────────────────────────────────────────────────────
+const WA_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.554 4.122 1.524 5.855L0 24l6.29-1.507A11.95 11.95 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.818a9.818 9.818 0 01-5.017-1.376l-.36-.213-3.732.979.996-3.638-.234-.374A9.818 9.818 0 012.182 12C2.182 6.573 6.573 2.182 12 2.182S21.818 6.573 21.818 12 17.427 21.818 12 21.818z"/></svg>`;
 
 function renderAll() {
-  const q = document.getElementById('search').value.toLowerCase();
+  const q    = document.getElementById('search').value.toLowerCase();
   const list = document.getElementById('guest-list');
-  let filtered = guests.filter(g => {
+  const filtered = guests.filter(g => {
     const mq = !q || g.name.toLowerCase().includes(q) || g.group.toLowerCase().includes(q) || g.phone.includes(q) || g.code.toLowerCase().includes(q);
     const mf = currentFilter==='all' || (currentFilter==='sent'&&sentMap[g.id]) || (currentFilter==='pending'&&!sentMap[g.id]);
     return mq && mf;
   });
-  document.getElementById('total-count').textContent = guests.length;
-  document.getElementById('sent-count').textContent = Object.keys(sentMap).length;
+  document.getElementById('total-count').textContent   = guests.length;
+  document.getElementById('sent-count').textContent    = Object.keys(sentMap).length;
   document.getElementById('pending-count').textContent = guests.length - Object.keys(sentMap).length;
-  if(!filtered.length){list.innerHTML='<div class="empty">Nenhum convidado encontrado.</div>';return;}
+  if (!filtered.length) { list.innerHTML = '<div class="empty">Nenhum convidado encontrado.</div>'; return; }
+
   list.innerHTML = filtered.map(g => {
-    const sent = !!sentMap[g.id];
+    const sent   = !!sentMap[g.id];
     const isOpen = openEditId === g.id;
     return `<div class="card ${sent?'sent':'pending'}" id="card-${g.id}">
       <div class="card-main">
@@ -303,11 +373,8 @@ function renderAll() {
         <div class="card-actions">
           <span class="status-badge ${sent?'sent':'pending'}">${sent?'✓ Enviado':'Pendente'}</span>
           <div class="row-btns">
-            <button class="btn-icon" title="Editar" onclick="toggleEdit(${g.id})">&#9998; Editar</button>
-            <button class="btn-send" onclick="openPreview(${g.id})">
-              <svg viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.554 4.122 1.524 5.855L0 24l6.29-1.507A11.95 11.95 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.818a9.818 9.818 0 01-5.017-1.376l-.36-.213-3.732.979.996-3.638-.234-.374A9.818 9.818 0 012.182 12C2.182 6.573 6.573 2.182 12 2.182S21.818 6.573 21.818 12 17.427 21.818 12 21.818z"/></svg>
-              Enviar
-            </button>
+            <button class="btn-icon" onclick="toggleEdit(${g.id})">&#9998; Editar</button>
+            <button class="btn-send" onclick="openPreview(${g.id})">${WA_SVG} Enviar</button>
           </div>
           <span style="font-size:10px;color:var(--muted);cursor:pointer;text-decoration:underline" onclick="toggleStatus(${g.id})">${sent?'Marcar pendente':'Marcar enviado'}</span>
         </div>
@@ -318,31 +385,16 @@ function renderAll() {
           </div>
           <div style="display:flex;gap:8px;">
             <button class="btn-icon" onclick="toggleEdit(${g.id})">&#9998; Editar</button>
-            <button class="btn-send" onclick="openPreview(${g.id})">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.554 4.122 1.524 5.855L0 24l6.29-1.507A11.95 11.95 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.818a9.818 9.818 0 01-5.017-1.376l-.36-.213-3.732.979.996-3.638-.234-.374A9.818 9.818 0 012.182 12C2.182 6.573 6.573 2.182 12 2.182S21.818 6.573 21.818 12 17.427 21.818 12 21.818z"/></svg>
-              Enviar
-            </button>
+            <button class="btn-send" onclick="openPreview(${g.id})">${WA_SVG} Enviar</button>
           </div>
         </div>
       </div>
       <div class="edit-panel ${isOpen?'open':''}" id="edit-${g.id}">
         <div class="edit-grid">
-          <div class="field-wrap">
-            <label>Nome</label>
-            <input type="text" id="edit-name-${g.id}" value="${escHtml(g.name)}" placeholder="Nome do contato" />
-          </div>
-          <div class="field-wrap">
-            <label>Telefone</label>
-            <input type="text" id="edit-phone-${g.id}" value="${escHtml(g.phone)}" placeholder="(17) 99999-9999" />
-          </div>
-          <div class="field-wrap">
-            <label>Código / Link personalizado</label>
-            <input type="text" id="edit-code-${g.id}" value="${escHtml(g.code)}" placeholder="Ex: Yuller e Familia" />
-          </div>
-          <div class="field-wrap" style="grid-column:1/-1">
-            <label>Grupo / Família</label>
-            <input type="text" id="edit-group-${g.id}" value="${escHtml(g.group)}" placeholder="Ex: Yuller e Miriely" />
-          </div>
+          <div class="field-wrap"><label>Nome</label><input type="text" id="edit-name-${g.id}" value="${escHtml(g.name)}" /></div>
+          <div class="field-wrap"><label>Telefone</label><input type="text" id="edit-phone-${g.id}" value="${escHtml(g.phone)}" /></div>
+          <div class="field-wrap"><label>Código</label><input type="text" id="edit-code-${g.id}" value="${escHtml(g.code)}" /></div>
+          <div class="field-wrap" style="grid-column:1/-1"><label>Grupo / Família</label><input type="text" id="edit-group-${g.id}" value="${escHtml(g.group)}" /></div>
         </div>
         <div class="edit-actions">
           <button class="btn-cancel-edit" onclick="cancelEdit(${g.id})">Cancelar</button>
@@ -353,77 +405,67 @@ function renderAll() {
   }).join('');
 }
 
-function escHtml(s) {
-  return String(s).replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
+// ── Ações (expostas globalmente para os onclick inline) ───────
+window.toggleEdit = id => { openEditId = openEditId===id ? null : id; renderAll(); };
+window.cancelEdit = id => { openEditId = null; renderAll(); };
 
-function toggleEdit(id) {
-  openEditId = openEditId === id ? null : id;
-  renderAll();
-}
-
-function cancelEdit(id) {
-  openEditId = null;
-  renderAll();
-}
-
-function saveEdit(id) {
+window.saveEdit = id => {
   const g = guests.find(x=>x.id===id);
   if(!g) return;
-  g.name = document.getElementById('edit-name-'+id).value.trim() || g.name;
+  g.name  = document.getElementById('edit-name-'+id).value.trim()  || g.name;
   g.phone = document.getElementById('edit-phone-'+id).value.trim() || g.phone;
-  g.code = document.getElementById('edit-code-'+id).value.trim() || g.code;
+  g.code  = document.getElementById('edit-code-'+id).value.trim()  || g.code;
   g.group = document.getElementById('edit-group-'+id).value.trim() || g.group;
   openEditId = null;
   saveState();
   renderAll();
-}
+};
 
-function buildMsg(g) {
-  const link = document.getElementById('link-site').value || 'https://seusite.com.br/confirmar';
-  const tpl = document.getElementById('msg-template').value;
-  return tpl.replace('{nome}', g.name.split(' ')[0]).replace('{link}', link).replace('{codigo}', g.code);
-}
-
-function openPreview(id) {
+window.openPreview = id => {
   activeIdx = id;
-  const g = guests.find(x=>x.id===id);
-  const msg = buildMsg(g);
+  const g    = guests.find(x=>x.id===id);
+  const link = document.getElementById('link-site').value || 'https://seusite.com.br/confirmar';
+  const tpl  = document.getElementById('msg-template').value;
+  const msg  = tpl.replace('{nome}', g.name.split(' ')[0]).replace('{link}', link).replace('{codigo}', g.code);
   document.getElementById('preview-msg').textContent = msg;
-  const waNum = phoneToWa(g.phone);
-  document.getElementById('preview-wa-link').href = `https://wa.me/${waNum}?text=${encodeURIComponent(msg)}`;
-  document.getElementById('preview-modal').style.display='flex';
-}
+  document.getElementById('preview-wa-link').href = `https://wa.me/${phoneToWa(g.phone)}?text=${encodeURIComponent(msg)}`;
+  document.getElementById('preview-modal').style.display = 'flex';
+};
 
-function closePreview() {
-  document.getElementById('preview-modal').style.display='none';
-  activeIdx=null;
-}
+window.closePreview = () => {
+  document.getElementById('preview-modal').style.display = 'none';
+  activeIdx = null;
+};
 
-function confirmSend() {
-  if(activeIdx!==null){
-    sentMap[activeIdx]=true;
+window.confirmSend = () => {
+  if (activeIdx !== null) {
+    sentMap[activeIdx] = true;
     saveState();
-    setTimeout(()=>{closePreview();renderAll();},150);
+    setTimeout(() => { closePreview(); renderAll(); }, 150);
   }
-}
+};
 
-function toggleStatus(id) {
-  if(sentMap[id]) delete sentMap[id]; else sentMap[id]=true;
-  saveState(); renderAll();
-}
+window.toggleStatus = id => {
+  if (sentMap[id]) delete sentMap[id]; else sentMap[id] = true;
+  saveState();
+  renderAll();
+};
 
-function setFilter(f,el) {
-  currentFilter=f;
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+window.setFilter = (f, el) => {
+  currentFilter = f;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
   renderAll();
-}
+};
 
+// ── Listeners ─────────────────────────────────────────────────
 document.getElementById('search').addEventListener('input', renderAll);
-document.getElementById('link-site').addEventListener('change', saveState);
-document.getElementById('msg-template').addEventListener('change', saveState);
-document.getElementById('preview-modal').addEventListener('click', e=>{if(e.target===e.currentTarget)closePreview();});
+document.getElementById('link-site').addEventListener('input', debounceSave);
+document.getElementById('msg-template').addEventListener('input', debounceSave);
+document.getElementById('preview-modal').addEventListener('click', e => { if(e.target===e.currentTarget) closePreview(); });
 
+// ── Init ──────────────────────────────────────────────────────
 loadState();
 </script>
+</body>
+</html>
